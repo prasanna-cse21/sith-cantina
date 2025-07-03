@@ -4,6 +4,7 @@ import Header from '../../components/Layout/Header';
 import Toast from '../../components/Common/Toast';
 import { MenuItem, Order } from '../../types';
 import { supabase } from '../../lib/supabase';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface ToastMessage {
   id: string;
@@ -12,6 +13,7 @@ interface ToastMessage {
 }
 
 const StaffDashboard: React.FC = () => {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<'orders' | 'menu'>('orders');
   const [orders, setOrders] = useState<Order[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
@@ -69,14 +71,20 @@ const StaffDashboard: React.FC = () => {
         image_url: '',
         category: 'main_course',
         serves: '1',
-        canteen_name: '',
+        canteen_name: user?.full_name || '', // Pre-fill with staff's canteen name
         quantity_available: '0'
       });
     }
-  }, [editingItem]);
+  }, [editingItem, user]);
 
   const fetchOrders = async () => {
     try {
+      if (!user?.full_name) {
+        console.error('Staff user full_name not available');
+        return;
+      }
+
+      // Fetch orders that contain items from this staff member's canteen
       const { data, error } = await supabase
         .from('orders')
         .select(`
@@ -90,7 +98,25 @@ const StaffDashboard: React.FC = () => {
         .order('created_at', { ascending: false });
 
       if (error) throw error;
-      setOrders(data || []);
+
+      // Filter orders to only include those with items from this staff's canteen
+      const filteredOrders = (data || []).filter(order => 
+        order.order_items.some(item => 
+          item.menu_item.canteen_name === user.full_name
+        )
+      ).map(order => ({
+        ...order,
+        // Filter order items to only show items from this canteen
+        order_items: order.order_items.filter(item => 
+          item.menu_item.canteen_name === user.full_name
+        ),
+        // Recalculate total amount for items from this canteen only
+        total_amount: order.order_items
+          .filter(item => item.menu_item.canteen_name === user.full_name)
+          .reduce((sum, item) => sum + (item.price * item.quantity), 0)
+      }));
+
+      setOrders(filteredOrders);
     } catch (error) {
       console.error('Error fetching orders:', error);
     } finally {
@@ -100,9 +126,16 @@ const StaffDashboard: React.FC = () => {
 
   const fetchMenuItems = async () => {
     try {
+      if (!user?.full_name) {
+        console.error('Staff user full_name not available');
+        return;
+      }
+
+      // Only fetch menu items for this staff member's canteen
       const { data, error } = await supabase
         .from('menu_items')
         .select('*')
+        .eq('canteen_name', user.full_name)
         .order('name');
 
       if (error) throw error;
@@ -161,11 +194,6 @@ const StaffDashboard: React.FC = () => {
       return;
     }
 
-    if (!editForm.canteen_name.trim()) {
-      showToast('Please enter a canteen name', 'error');
-      return;
-    }
-
     const price = parseFloat(editForm.price);
     if (isNaN(price) || price <= 0) {
       showToast('Please enter a valid price', 'error');
@@ -197,7 +225,7 @@ const StaffDashboard: React.FC = () => {
         image_url: imageUrl,
         category: editForm.category || 'main_course',
         serves: serves,
-        canteen_name: editForm.canteen_name.trim(),
+        canteen_name: user?.full_name || '', // Always use staff's canteen name
         quantity_available: quantityAvailable
       };
 
@@ -282,33 +310,6 @@ const StaffDashboard: React.FC = () => {
     }
   };
 
-  // Group orders by canteen but keep them as separate entries for each canteen
-  const ordersByCanteen = orders.reduce((acc, order) => {
-    // Get unique canteens for this order
-    const canteens = [...new Set(order.order_items.map(item => item.menu_item.canteen_name))];
-    
-    canteens.forEach(canteenName => {
-      if (!acc[canteenName]) {
-        acc[canteenName] = [];
-      }
-      
-      // Create a separate order entry for each canteen
-      const canteenOrder = {
-        ...order,
-        // Create a unique ID for this canteen-specific order view
-        displayId: `${order.id}-${canteenName}`,
-        order_items: order.order_items.filter(item => item.menu_item.canteen_name === canteenName),
-        total_amount: order.order_items
-          .filter(item => item.menu_item.canteen_name === canteenName)
-          .reduce((sum, item) => sum + (item.price * item.quantity), 0)
-      };
-      
-      acc[canteenName].push(canteenOrder);
-    });
-    
-    return acc;
-  }, {} as Record<string, (Order & { displayId: string })[]>);
-
   const isOrderUpdating = (orderId: string, status: string) => {
     const updateKey = `${orderId}-${status}`;
     return updatingOrders.has(updateKey);
@@ -324,7 +325,7 @@ const StaffDashboard: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header title="Staff Dashboard" />
+      <Header title={`${user?.full_name || 'Staff'} Dashboard`} />
 
       {/* Toast Notifications */}
       {toasts.map((toast) => (
@@ -367,7 +368,7 @@ const StaffDashboard: React.FC = () => {
         {activeTab === 'orders' && (
           <div className="space-y-8">
             <div className="flex justify-between items-center">
-              <h2 className="text-2xl font-bold text-gray-900">Orders by Canteen</h2>
+              <h2 className="text-2xl font-bold text-gray-900">Orders for {user?.full_name}</h2>
               <div className="flex space-x-4">
                 <div className="bg-white px-4 py-2 rounded-lg shadow-sm">
                   <span className="text-sm text-gray-600">Total Orders: </span>
@@ -382,90 +383,80 @@ const StaffDashboard: React.FC = () => {
               </div>
             </div>
 
-            {Object.keys(ordersByCanteen).length === 0 ? (
+            {orders.length === 0 ? (
               <div className="text-center py-12">
                 <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
                   <Clock className="w-8 h-8 text-gray-400" />
                 </div>
                 <h3 className="text-lg font-medium text-gray-900 mb-2">No orders yet</h3>
-                <p className="text-gray-600">Orders will appear here when students place them</p>
+                <p className="text-gray-600">Orders for {user?.full_name} will appear here when students place them</p>
               </div>
             ) : (
-              Object.entries(ordersByCanteen).map(([canteenName, canteenOrders]) => (
-                <div key={canteenName} className="bg-white rounded-xl shadow-lg p-6">
-                  <h3 className="text-xl font-bold text-gray-900 mb-6 border-b pb-3">
-                    {canteenName} ({canteenOrders.length} orders)
-                  </h3>
-                  
-                  <div className="grid gap-6">
-                    {canteenOrders.map((order) => {
-                      return (
-                        <div key={order.displayId} className="border border-gray-200 rounded-lg p-4">
-                          <div className="flex justify-between items-start mb-4">
-                            <div>
-                              <h4 className="text-lg font-semibold text-gray-900">
-                                Order #{order.id.slice(0, 8)}
-                              </h4>
-                              <p className="text-sm text-gray-600">
-                                {order.user?.full_name || 'Unknown User'} ({order.user?.registration_number || 'N/A'})
-                              </p>
-                              <p className="text-sm text-gray-600">
-                                {new Date(order.created_at).toLocaleDateString()} at{' '}
-                                {new Date(order.created_at).toLocaleTimeString()}
-                              </p>
-                            </div>
-                            <div className="text-right">
-                              <p className="text-xl font-bold text-gray-900">₹{order.total_amount}</p>
-                              <div className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusColor(order.status)}`}>
-                                {getStatusIcon(order.status)}
-                                <span className="ml-1 capitalize">{order.status}</span>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="mb-4">
-                            <h5 className="font-medium text-gray-900 mb-2">Items from {canteenName}:</h5>
-                            <div className="space-y-2">
-                              {order.order_items.map((item) => (
-                                <div key={item.id} className="flex justify-between items-center bg-gray-50 p-2 rounded">
-                                  <span className="text-gray-700">
-                                    {item.menu_item.name} x {item.quantity}
-                                  </span>
-                                  <span className="font-medium text-gray-900">₹{item.price * item.quantity}</span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-
-                          <div className="flex space-x-2">
-                            <button
-                              onClick={() => updateOrderStatus(order.id, 'processing')}
-                              disabled={order.status !== 'pending' || isOrderUpdating(order.id, 'processing')}
-                              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 text-sm"
-                            >
-                              {isOrderUpdating(order.id, 'processing') ? 'Updating...' : 'Start Processing'}
-                            </button>
-                            <button
-                              onClick={() => updateOrderStatus(order.id, 'ready')}
-                              disabled={order.status !== 'processing' || isOrderUpdating(order.id, 'ready')}
-                              className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 text-sm"
-                            >
-                              {isOrderUpdating(order.id, 'ready') ? 'Updating...' : 'Mark Ready'}
-                            </button>
-                            <button
-                              onClick={() => updateOrderStatus(order.id, 'completed')}
-                              disabled={order.status !== 'ready' || isOrderUpdating(order.id, 'completed')}
-                              className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 text-sm"
-                            >
-                              {isOrderUpdating(order.id, 'completed') ? 'Updating...' : 'Complete'}
-                            </button>
-                          </div>
+              <div className="grid gap-6">
+                {orders.map((order) => (
+                  <div key={order.id} className="bg-white rounded-xl shadow-lg p-6">
+                    <div className="flex justify-between items-start mb-4">
+                      <div>
+                        <h4 className="text-lg font-semibold text-gray-900">
+                          Order #{order.id.slice(0, 8)}
+                        </h4>
+                        <p className="text-sm text-gray-600">
+                          {order.user?.full_name || 'Unknown User'} ({order.user?.registration_number || 'N/A'})
+                        </p>
+                        <p className="text-sm text-gray-600">
+                          {new Date(order.created_at).toLocaleDateString()} at{' '}
+                          {new Date(order.created_at).toLocaleTimeString()}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xl font-bold text-gray-900">₹{order.total_amount}</p>
+                        <div className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusColor(order.status)}`}>
+                          {getStatusIcon(order.status)}
+                          <span className="ml-1 capitalize">{order.status}</span>
                         </div>
-                      );
-                    })}
+                      </div>
+                    </div>
+
+                    <div className="mb-4">
+                      <h5 className="font-medium text-gray-900 mb-2">Items from {user?.full_name}:</h5>
+                      <div className="space-y-2">
+                        {order.order_items.map((item) => (
+                          <div key={item.id} className="flex justify-between items-center bg-gray-50 p-2 rounded">
+                            <span className="text-gray-700">
+                              {item.menu_item.name} x {item.quantity}
+                            </span>
+                            <span className="font-medium text-gray-900">₹{item.price * item.quantity}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="flex space-x-2">
+                      <button
+                        onClick={() => updateOrderStatus(order.id, 'processing')}
+                        disabled={order.status !== 'pending' || isOrderUpdating(order.id, 'processing')}
+                        className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 text-sm"
+                      >
+                        {isOrderUpdating(order.id, 'processing') ? 'Updating...' : 'Start Processing'}
+                      </button>
+                      <button
+                        onClick={() => updateOrderStatus(order.id, 'ready')}
+                        disabled={order.status !== 'processing' || isOrderUpdating(order.id, 'ready')}
+                        className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 text-sm"
+                      >
+                        {isOrderUpdating(order.id, 'ready') ? 'Updating...' : 'Mark Ready'}
+                      </button>
+                      <button
+                        onClick={() => updateOrderStatus(order.id, 'completed')}
+                        disabled={order.status !== 'ready' || isOrderUpdating(order.id, 'completed')}
+                        className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 text-sm"
+                      >
+                        {isOrderUpdating(order.id, 'completed') ? 'Updating...' : 'Complete'}
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))
+                ))}
+              </div>
             )}
           </div>
         )}
@@ -474,7 +465,7 @@ const StaffDashboard: React.FC = () => {
         {activeTab === 'menu' && (
           <div className="space-y-6">
             <div className="flex justify-between items-center">
-              <h2 className="text-2xl font-bold text-gray-900">Menu Items</h2>
+              <h2 className="text-2xl font-bold text-gray-900">Menu Items for {user?.full_name}</h2>
               <button
                 onClick={() => {
                   setEditingItem(null);
@@ -539,7 +530,7 @@ const StaffDashboard: React.FC = () => {
                   <Plus className="w-8 h-8 text-gray-400" />
                 </div>
                 <h3 className="text-lg font-medium text-gray-900 mb-2">No menu items yet</h3>
-                <p className="text-gray-600">Add your first menu item to get started</p>
+                <p className="text-gray-600">Add your first menu item for {user?.full_name} to get started</p>
               </div>
             )}
           </div>
@@ -648,7 +639,7 @@ const StaffDashboard: React.FC = () => {
                 </div>
               </div>
 
-              {/* Category and Canteen */}
+              {/* Category and Canteen (Read-only) */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -670,16 +661,18 @@ const StaffDashboard: React.FC = () => {
 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Canteen Name *
+                    Canteen Name
                   </label>
                   <input
                     type="text"
-                    value={editForm.canteen_name}
-                    onChange={(e) => setEditForm(prev => ({ ...prev, canteen_name: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                    placeholder="Enter canteen name"
-                    disabled={savingMenuItem}
+                    value={user?.full_name || ''}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-100 text-gray-600"
+                    disabled
+                    readOnly
                   />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Items will be added to your canteen automatically
+                  </p>
                 </div>
               </div>
 
