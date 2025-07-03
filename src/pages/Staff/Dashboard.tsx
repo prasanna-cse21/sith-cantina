@@ -1,0 +1,729 @@
+import React, { useState, useEffect } from 'react';
+import { Plus, Edit, Trash2, Clock, CheckCircle, AlertCircle, Package, X, DollarSign, Users, Package2 } from 'lucide-react';
+import Header from '../../components/Layout/Header';
+import Toast from '../../components/Common/Toast';
+import { MenuItem, Order } from '../../types';
+import { supabase } from '../../lib/supabase';
+
+interface ToastMessage {
+  id: string;
+  message: string;
+  type: 'success' | 'error';
+}
+
+const StaffDashboard: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<'orders' | 'menu'>('orders');
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
+  const [updatingOrders, setUpdatingOrders] = useState<Set<string>>(new Set());
+  const [savingMenuItem, setSavingMenuItem] = useState(false);
+  const [deletingMenuItem, setDeletingMenuItem] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  // Form state for editing menu items
+  const [editForm, setEditForm] = useState({
+    name: '',
+    description: '',
+    price: '',
+    image_url: '',
+    category: '',
+    serves: '',
+    canteen_name: '',
+    quantity_available: ''
+  });
+
+  const showToast = (message: string, type: 'success' | 'error') => {
+    const id = Date.now().toString();
+    setToasts(prev => [...prev, { id, message, type }]);
+  };
+
+  const removeToast = (id: string) => {
+    setToasts(prev => prev.filter(toast => toast.id !== id));
+  };
+
+  useEffect(() => {
+    fetchOrders();
+    fetchMenuItems();
+  }, []);
+
+  useEffect(() => {
+    if (editingItem) {
+      setEditForm({
+        name: editingItem.name,
+        description: editingItem.description,
+        price: editingItem.price.toString(),
+        image_url: editingItem.image_url,
+        category: editingItem.category,
+        serves: editingItem.serves.toString(),
+        canteen_name: editingItem.canteen_name,
+        quantity_available: editingItem.quantity_available.toString()
+      });
+    } else {
+      setEditForm({
+        name: '',
+        description: '',
+        price: '',
+        image_url: '',
+        category: 'main_course',
+        serves: '1',
+        canteen_name: '',
+        quantity_available: '0'
+      });
+    }
+  }, [editingItem]);
+
+  const fetchOrders = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('orders')
+        .select(`
+          *,
+          user:users(*),
+          order_items:order_items(
+            *,
+            menu_item:menu_items(*)
+          )
+        `)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setOrders(data || []);
+    } catch (error) {
+      console.error('Error fetching orders:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchMenuItems = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('menu_items')
+        .select('*')
+        .order('name');
+
+      if (error) throw error;
+      setMenuItems(data || []);
+    } catch (error) {
+      console.error('Error fetching menu items:', error);
+    }
+  };
+
+  const updateOrderStatus = async (orderId: string, status: string) => {
+    // Create a unique key for this specific order update
+    const updateKey = `${orderId}-${status}`;
+    
+    if (updatingOrders.has(updateKey)) return;
+
+    setUpdatingOrders(prev => new Set(prev).add(updateKey));
+    
+    try {
+      const { error } = await supabase
+        .from('orders')
+        .update({ status })
+        .eq('id', orderId);
+
+      if (error) throw error;
+      
+      if (status === 'ready') {
+        showToast('Order marked as ready! Customer will be notified.', 'success');
+      } else {
+        showToast(`Order status updated to ${status}`, 'success');
+      }
+      
+      await fetchOrders();
+    } catch (error) {
+      console.error('Error updating order status:', error);
+      showToast('Failed to update order status. Please try again.', 'error');
+    } finally {
+      setUpdatingOrders(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(updateKey);
+        return newSet;
+      });
+    }
+  };
+
+  const handleSaveMenuItem = async () => {
+    if (savingMenuItem) return;
+
+    // Basic validation
+    if (!editForm.name.trim()) {
+      showToast('Please enter an item name', 'error');
+      return;
+    }
+
+    if (!editForm.description.trim()) {
+      showToast('Please enter a description', 'error');
+      return;
+    }
+
+    if (!editForm.canteen_name.trim()) {
+      showToast('Please enter a canteen name', 'error');
+      return;
+    }
+
+    const price = parseFloat(editForm.price);
+    if (isNaN(price) || price <= 0) {
+      showToast('Please enter a valid price', 'error');
+      return;
+    }
+
+    const serves = parseInt(editForm.serves);
+    if (isNaN(serves) || serves <= 0) {
+      showToast('Please enter a valid serves count', 'error');
+      return;
+    }
+
+    const quantityAvailable = parseInt(editForm.quantity_available);
+    if (isNaN(quantityAvailable) || quantityAvailable < 0) {
+      showToast('Please enter a valid quantity', 'error');
+      return;
+    }
+
+    setSavingMenuItem(true);
+
+    try {
+      const defaultImageUrl = 'https://images.pexels.com/photos/1640777/pexels-photo-1640777.jpeg';
+      const imageUrl = editForm.image_url.trim() || defaultImageUrl;
+
+      const menuItemData = {
+        name: editForm.name.trim(),
+        description: editForm.description.trim(),
+        price: price,
+        image_url: imageUrl,
+        category: editForm.category || 'main_course',
+        serves: serves,
+        canteen_name: editForm.canteen_name.trim(),
+        quantity_available: quantityAvailable
+      };
+
+      let result;
+      if (editingItem) {
+        result = await supabase
+          .from('menu_items')
+          .update(menuItemData)
+          .eq('id', editingItem.id)
+          .select();
+      } else {
+        result = await supabase
+          .from('menu_items')
+          .insert([menuItemData])
+          .select();
+      }
+
+      if (result.error) {
+        throw new Error(result.error.message);
+      }
+
+      showToast(
+        editingItem ? 'Menu item updated successfully!' : 'Menu item created successfully!', 
+        'success'
+      );
+
+      await fetchMenuItems();
+      setIsEditModalOpen(false);
+      setEditingItem(null);
+    } catch (error) {
+      console.error('Error saving menu item:', error);
+      showToast('Failed to save menu item. Please try again.', 'error');
+    } finally {
+      setSavingMenuItem(false);
+    }
+  };
+
+  const handleDeleteMenuItem = async (itemId: string) => {
+    if (deletingMenuItem === itemId) return;
+
+    if (!confirm('Are you sure you want to delete this menu item? This action cannot be undone.')) return;
+    
+    setDeletingMenuItem(itemId);
+
+    try {
+      const { error } = await supabase
+        .from('menu_items')
+        .delete()
+        .eq('id', itemId);
+
+      if (error) throw error;
+      
+      showToast('Menu item deleted successfully!', 'success');
+      await fetchMenuItems();
+    } catch (error) {
+      console.error('Error deleting menu item:', error);
+      showToast('Failed to delete menu item. Please try again.', 'error');
+    } finally {
+      setDeletingMenuItem(null);
+    }
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'pending': return 'bg-yellow-100 text-yellow-800';
+      case 'processing': return 'bg-blue-100 text-blue-800';
+      case 'ready': return 'bg-green-100 text-green-800';
+      case 'completed': return 'bg-gray-100 text-gray-800';
+      case 'cancelled': return 'bg-red-100 text-red-800';
+      default: return 'bg-gray-100 text-gray-800';
+    }
+  };
+
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case 'pending': return <Clock className="w-4 h-4" />;
+      case 'processing': return <Package className="w-4 h-4" />;
+      case 'ready': return <CheckCircle className="w-4 h-4" />;
+      case 'completed': return <CheckCircle className="w-4 h-4" />;
+      case 'cancelled': return <AlertCircle className="w-4 h-4" />;
+      default: return <Clock className="w-4 h-4" />;
+    }
+  };
+
+  // Group orders by canteen but keep them as separate entries for each canteen
+  const ordersByCanteen = orders.reduce((acc, order) => {
+    // Get unique canteens for this order
+    const canteens = [...new Set(order.order_items.map(item => item.menu_item.canteen_name))];
+    
+    canteens.forEach(canteenName => {
+      if (!acc[canteenName]) {
+        acc[canteenName] = [];
+      }
+      
+      // Create a separate order entry for each canteen
+      const canteenOrder = {
+        ...order,
+        // Create a unique ID for this canteen-specific order view
+        displayId: `${order.id}-${canteenName}`,
+        order_items: order.order_items.filter(item => item.menu_item.canteen_name === canteenName),
+        total_amount: order.order_items
+          .filter(item => item.menu_item.canteen_name === canteenName)
+          .reduce((sum, item) => sum + (item.price * item.quantity), 0)
+      };
+      
+      acc[canteenName].push(canteenOrder);
+    });
+    
+    return acc;
+  }, {} as Record<string, (Order & { displayId: string })[]>);
+
+  const isOrderUpdating = (orderId: string, status: string) => {
+    const updateKey = `${orderId}-${status}`;
+    return updatingOrders.has(updateKey);
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <Header title="Staff Dashboard" />
+
+      {/* Toast Notifications */}
+      {toasts.map((toast) => (
+        <Toast
+          key={toast.id}
+          message={toast.message}
+          type={toast.type}
+          onClose={() => removeToast(toast.id)}
+        />
+      ))}
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Tabs */}
+        <div className="mb-8">
+          <nav className="flex space-x-8">
+            <button
+              onClick={() => setActiveTab('orders')}
+              className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'orders'
+                  ? 'border-orange-500 text-orange-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Orders Management
+            </button>
+            <button
+              onClick={() => setActiveTab('menu')}
+              className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'menu'
+                  ? 'border-orange-500 text-orange-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Menu Management
+            </button>
+          </nav>
+        </div>
+
+        {/* Orders Tab */}
+        {activeTab === 'orders' && (
+          <div className="space-y-8">
+            <div className="flex justify-between items-center">
+              <h2 className="text-2xl font-bold text-gray-900">Orders by Canteen</h2>
+              <div className="flex space-x-4">
+                <div className="bg-white px-4 py-2 rounded-lg shadow-sm">
+                  <span className="text-sm text-gray-600">Total Orders: </span>
+                  <span className="font-semibold text-gray-900">{orders.length}</span>
+                </div>
+                <div className="bg-white px-4 py-2 rounded-lg shadow-sm">
+                  <span className="text-sm text-gray-600">Pending: </span>
+                  <span className="font-semibold text-yellow-600">
+                    {orders.filter(o => o.status === 'pending').length}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {Object.keys(ordersByCanteen).length === 0 ? (
+              <div className="text-center py-12">
+                <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Clock className="w-8 h-8 text-gray-400" />
+                </div>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">No orders yet</h3>
+                <p className="text-gray-600">Orders will appear here when students place them</p>
+              </div>
+            ) : (
+              Object.entries(ordersByCanteen).map(([canteenName, canteenOrders]) => (
+                <div key={canteenName} className="bg-white rounded-xl shadow-lg p-6">
+                  <h3 className="text-xl font-bold text-gray-900 mb-6 border-b pb-3">
+                    {canteenName} ({canteenOrders.length} orders)
+                  </h3>
+                  
+                  <div className="grid gap-6">
+                    {canteenOrders.map((order) => {
+                      return (
+                        <div key={order.displayId} className="border border-gray-200 rounded-lg p-4">
+                          <div className="flex justify-between items-start mb-4">
+                            <div>
+                              <h4 className="text-lg font-semibold text-gray-900">
+                                Order #{order.id.slice(0, 8)}
+                              </h4>
+                              <p className="text-sm text-gray-600">
+                                {order.user?.full_name || 'Unknown User'} ({order.user?.registration_number || 'N/A'})
+                              </p>
+                              <p className="text-sm text-gray-600">
+                                {new Date(order.created_at).toLocaleDateString()} at{' '}
+                                {new Date(order.created_at).toLocaleTimeString()}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-xl font-bold text-gray-900">₹{order.total_amount}</p>
+                              <div className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusColor(order.status)}`}>
+                                {getStatusIcon(order.status)}
+                                <span className="ml-1 capitalize">{order.status}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mb-4">
+                            <h5 className="font-medium text-gray-900 mb-2">Items from {canteenName}:</h5>
+                            <div className="space-y-2">
+                              {order.order_items.map((item) => (
+                                <div key={item.id} className="flex justify-between items-center bg-gray-50 p-2 rounded">
+                                  <span className="text-gray-700">
+                                    {item.menu_item.name} x {item.quantity}
+                                  </span>
+                                  <span className="font-medium text-gray-900">₹{item.price * item.quantity}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="flex space-x-2">
+                            <button
+                              onClick={() => updateOrderStatus(order.id, 'processing')}
+                              disabled={order.status !== 'pending' || isOrderUpdating(order.id, 'processing')}
+                              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 text-sm"
+                            >
+                              {isOrderUpdating(order.id, 'processing') ? 'Updating...' : 'Start Processing'}
+                            </button>
+                            <button
+                              onClick={() => updateOrderStatus(order.id, 'ready')}
+                              disabled={order.status !== 'processing' || isOrderUpdating(order.id, 'ready')}
+                              className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 text-sm"
+                            >
+                              {isOrderUpdating(order.id, 'ready') ? 'Updating...' : 'Mark Ready'}
+                            </button>
+                            <button
+                              onClick={() => updateOrderStatus(order.id, 'completed')}
+                              disabled={order.status !== 'ready' || isOrderUpdating(order.id, 'completed')}
+                              className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200 text-sm"
+                            >
+                              {isOrderUpdating(order.id, 'completed') ? 'Updating...' : 'Complete'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
+        {/* Menu Tab */}
+        {activeTab === 'menu' && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h2 className="text-2xl font-bold text-gray-900">Menu Items</h2>
+              <button
+                onClick={() => {
+                  setEditingItem(null);
+                  setIsEditModalOpen(true);
+                }}
+                className="flex items-center space-x-2 bg-orange-500 text-white px-4 py-2 rounded-lg hover:bg-orange-600 transition-colors duration-200"
+              >
+                <Plus className="w-5 h-5" />
+                <span>Add New Item</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {menuItems.map((item) => (
+                <div key={item.id} className="bg-white rounded-xl shadow-lg overflow-hidden">
+                  <img
+                    src={item.image_url}
+                    alt={item.name}
+                    className="w-full h-48 object-cover"
+                  />
+                  <div className="p-6">
+                    <div className="flex justify-between items-start mb-2">
+                      <h3 className="text-xl font-semibold text-gray-900">{item.name}</h3>
+                      <span className="text-xl font-bold text-orange-500">₹{item.price}</span>
+                    </div>
+                    <p className="text-gray-600 mb-4">{item.description}</p>
+                    <div className="flex items-center justify-between text-sm text-gray-500 mb-2">
+                      <span>Available: {item.quantity_available}</span>
+                      <span>Serves: {item.serves}</span>
+                    </div>
+                    <div className="text-sm text-gray-600 mb-4">
+                      <span className="font-medium">Canteen:</span> {item.canteen_name}
+                    </div>
+                    <div className="flex space-x-2">
+                      <button
+                        onClick={() => {
+                          setEditingItem(item);
+                          setIsEditModalOpen(true);
+                        }}
+                        className="flex-1 flex items-center justify-center space-x-2 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors duration-200"
+                      >
+                        <Edit className="w-4 h-4" />
+                        <span>Edit</span>
+                      </button>
+                      <button
+                        onClick={() => handleDeleteMenuItem(item.id)}
+                        disabled={deletingMenuItem === item.id}
+                        className="flex-1 flex items-center justify-center space-x-2 bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                        <span>{deletingMenuItem === item.id ? 'Deleting...' : 'Delete'}</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {menuItems.length === 0 && (
+              <div className="text-center py-12">
+                <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Plus className="w-8 h-8 text-gray-400" />
+                </div>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">No menu items yet</h3>
+                <p className="text-gray-600">Add your first menu item to get started</p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Edit/Add Menu Item Modal */}
+      {isEditModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-6 border-b border-gray-200">
+              <h3 className="text-xl font-semibold text-gray-900">
+                {editingItem ? 'Edit Menu Item' : 'Add New Menu Item'}
+              </h3>
+              <button
+                onClick={() => setIsEditModalOpen(false)}
+                disabled={savingMenuItem}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+              >
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 space-y-6">
+              {/* Name */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Item Name *
+                </label>
+                <input
+                  type="text"
+                  value={editForm.name}
+                  onChange={(e) => setEditForm(prev => ({ ...prev, name: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                  placeholder="Enter item name"
+                  disabled={savingMenuItem}
+                />
+              </div>
+
+              {/* Description */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Description *
+                </label>
+                <textarea
+                  value={editForm.description}
+                  onChange={(e) => setEditForm(prev => ({ ...prev, description: e.target.value }))}
+                  rows={3}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                  placeholder="Enter item description"
+                  disabled={savingMenuItem}
+                />
+              </div>
+
+              {/* Price, Serves, Quantity Available */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    <DollarSign className="w-4 h-4 inline mr-1" />
+                    Price (₹) *
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={editForm.price}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, price: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                    placeholder="0.00"
+                    disabled={savingMenuItem}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    <Users className="w-4 h-4 inline mr-1" />
+                    Serves *
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={editForm.serves}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, serves: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                    placeholder="1"
+                    disabled={savingMenuItem}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    <Package2 className="w-4 h-4 inline mr-1" />
+                    Available Qty *
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editForm.quantity_available}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, quantity_available: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                    placeholder="0"
+                    disabled={savingMenuItem}
+                  />
+                </div>
+              </div>
+
+              {/* Category and Canteen */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Category
+                  </label>
+                  <select
+                    value={editForm.category}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, category: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                    disabled={savingMenuItem}
+                  >
+                    <option value="main_course">Main Course</option>
+                    <option value="snacks">Snacks</option>
+                    <option value="beverages">Beverages</option>
+                    <option value="south_indian">South Indian</option>
+                    <option value="desserts">Desserts</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Canteen Name *
+                  </label>
+                  <input
+                    type="text"
+                    value={editForm.canteen_name}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, canteen_name: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                    placeholder="Enter canteen name"
+                    disabled={savingMenuItem}
+                  />
+                </div>
+              </div>
+
+              {/* Image URL */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Image URL (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={editForm.image_url}
+                  onChange={(e) => setEditForm(prev => ({ ...prev, image_url: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                  placeholder="https://example.com/image.jpg"
+                  disabled={savingMenuItem}
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Leave empty to use default image
+                </p>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="flex space-x-4 p-6 border-t border-gray-200">
+              <button
+                onClick={() => setIsEditModalOpen(false)}
+                disabled={savingMenuItem}
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveMenuItem}
+                disabled={savingMenuItem}
+                className="flex-1 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {savingMenuItem ? 'Saving...' : editingItem ? 'Update Item' : 'Create Item'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default StaffDashboard;
