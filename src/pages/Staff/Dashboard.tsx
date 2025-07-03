@@ -84,45 +84,112 @@ const StaffDashboard: React.FC = () => {
         return;
       }
 
-      // Fetch orders that contain items from this staff member's canteen
-      const { data, error } = await supabase
+      // First, get all orders with their user information
+      const { data: allOrders, error: ordersError } = await supabase
         .from('orders')
         .select(`
-          *,
-          user:users(
-            id,
-            full_name,
-            registration_number,
-            email,
-            role
-          ),
-          order_items:order_items(
-            *,
-            menu_item:menu_items(*)
-          )
+          id,
+          user_id,
+          total_amount,
+          status,
+          payment_status,
+          payment_id,
+          created_at,
+          updated_at
         `)
         .order('created_at', { ascending: false });
 
-      if (error) throw error;
+      if (ordersError) throw ordersError;
 
-      // Filter orders to only include those with items from this staff's canteen
-      const filteredOrders = (data || []).filter(order => 
-        order.order_items.some(item => 
-          item.menu_item.canteen_name === user.full_name
-        )
-      ).map(order => ({
-        ...order,
-        // Filter order items to only show items from this canteen
-        order_items: order.order_items.filter(item => 
-          item.menu_item.canteen_name === user.full_name
-        ),
-        // Recalculate total amount for items from this canteen only
-        total_amount: order.order_items
-          .filter(item => item.menu_item.canteen_name === user.full_name)
-          .reduce((sum, item) => sum + (item.price * item.quantity), 0)
-      }));
+      if (!allOrders || allOrders.length === 0) {
+        setOrders([]);
+        return;
+      }
 
-      setOrders(filteredOrders);
+      // Get order items for all orders
+      const { data: allOrderItems, error: orderItemsError } = await supabase
+        .from('order_items')
+        .select(`
+          id,
+          order_id,
+          menu_item_id,
+          quantity,
+          price,
+          created_at,
+          menu_item:menu_items(
+            id,
+            name,
+            description,
+            price,
+            image_url,
+            category,
+            serves,
+            canteen_name,
+            rating,
+            quantity_available,
+            created_at,
+            updated_at
+          )
+        `)
+        .in('order_id', allOrders.map(order => order.id));
+
+      if (orderItemsError) throw orderItemsError;
+
+      // Get user information for all orders
+      const userIds = [...new Set(allOrders.map(order => order.user_id))];
+      const { data: users, error: usersError } = await supabase
+        .from('users')
+        .select(`
+          id,
+          email,
+          role,
+          full_name,
+          registration_number,
+          mobile_number,
+          created_at
+        `)
+        .in('id', userIds)
+        .eq('role', 'student'); // Only get student users
+
+      if (usersError) throw usersError;
+
+      // Create a map of users for quick lookup
+      const userMap = new Map();
+      users?.forEach(user => {
+        userMap.set(user.id, user);
+      });
+
+      // Filter orders that have items from this staff's canteen
+      const relevantOrders = allOrders.filter(order => {
+        const orderItems = allOrderItems?.filter(item => item.order_id === order.id) || [];
+        return orderItems.some(item => item.menu_item?.canteen_name === user.full_name);
+      });
+
+      // Build the final orders array with complete data
+      const ordersWithData = relevantOrders.map(order => {
+        const orderItems = allOrderItems?.filter(item => 
+          item.order_id === order.id && 
+          item.menu_item?.canteen_name === user.full_name
+        ) || [];
+
+        const orderUser = userMap.get(order.user_id);
+
+        // Calculate total amount for items from this canteen only
+        const canteenTotal = orderItems.reduce((sum, item) => 
+          sum + (item.price * item.quantity), 0
+        );
+
+        return {
+          ...order,
+          user: orderUser,
+          order_items: orderItems,
+          total_amount: canteenTotal
+        };
+      });
+
+      console.log('Orders with user data:', ordersWithData);
+      setOrders(ordersWithData);
+
     } catch (error) {
       console.error('Error fetching orders:', error);
     } finally {
