@@ -89,7 +89,13 @@ const StaffDashboard: React.FC = () => {
         .from('orders')
         .select(`
           *,
-          user:users(*),
+          user:users(
+            id,
+            full_name,
+            registration_number,
+            email,
+            role
+          ),
           order_items:order_items(
             *,
             menu_item:menu_items(*)
@@ -315,6 +321,22 @@ const StaffDashboard: React.FC = () => {
     return updatingOrders.has(updateKey);
   };
 
+  // Helper function to format student info
+  const formatStudentInfo = (orderUser: any) => {
+    if (!orderUser) {
+      return 'Unknown Student';
+    }
+    
+    const name = orderUser.full_name || 'Unknown Student';
+    const regNumber = orderUser.registration_number;
+    
+    if (regNumber) {
+      return `${name} (${regNumber})`;
+    }
+    
+    return name;
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -400,8 +422,8 @@ const StaffDashboard: React.FC = () => {
                         <h4 className="text-lg font-semibold text-gray-900">
                           Order #{order.id.slice(0, 8)}
                         </h4>
-                        <p className="text-sm text-gray-600">
-                          {order.user?.full_name || 'Unknown User'} ({order.user?.registration_number || 'N/A'})
+                        <p className="text-sm text-gray-600 font-medium">
+                          {formatStudentInfo(order.user)}
                         </p>
                         <p className="text-sm text-gray-600">
                           {new Date(order.created_at).toLocaleDateString()} at{' '}
