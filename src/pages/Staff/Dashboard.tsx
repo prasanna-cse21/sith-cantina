@@ -81,11 +81,14 @@ const StaffDashboard: React.FC = () => {
     try {
       if (!user?.full_name) {
         console.error('Staff user full_name not available');
+        setLoading(false);
         return;
       }
 
-      // First, get all orders with their user information
-      const { data: allOrders, error: ordersError } = await supabase
+      console.log('Fetching orders for canteen:', user.full_name);
+
+      // Step 1: Get all orders with user data using a proper join
+      const { data: ordersWithUsers, error: ordersError } = await supabase
         .from('orders')
         .select(`
           id,
@@ -95,19 +98,36 @@ const StaffDashboard: React.FC = () => {
           payment_status,
           payment_id,
           created_at,
-          updated_at
+          updated_at,
+          user:users!orders_user_id_fkey(
+            id,
+            email,
+            role,
+            full_name,
+            registration_number,
+            mobile_number,
+            created_at
+          )
         `)
         .order('created_at', { ascending: false });
 
-      if (ordersError) throw ordersError;
+      if (ordersError) {
+        console.error('Error fetching orders:', ordersError);
+        throw ordersError;
+      }
 
-      if (!allOrders || allOrders.length === 0) {
+      console.log('Orders with users:', ordersWithUsers);
+
+      if (!ordersWithUsers || ordersWithUsers.length === 0) {
+        console.log('No orders found');
         setOrders([]);
+        setLoading(false);
         return;
       }
 
-      // Get order items for all orders
-      const { data: allOrderItems, error: orderItemsError } = await supabase
+      // Step 2: Get order items with menu items for all orders
+      const orderIds = ordersWithUsers.map(order => order.id);
+      const { data: orderItems, error: orderItemsError } = await supabase
         .from('order_items')
         .select(`
           id,
@@ -116,7 +136,7 @@ const StaffDashboard: React.FC = () => {
           quantity,
           price,
           created_at,
-          menu_item:menu_items(
+          menu_item:menu_items!order_items_menu_item_id_fkey(
             id,
             name,
             description,
@@ -131,67 +151,55 @@ const StaffDashboard: React.FC = () => {
             updated_at
           )
         `)
-        .in('order_id', allOrders.map(order => order.id));
+        .in('order_id', orderIds);
 
-      if (orderItemsError) throw orderItemsError;
+      if (orderItemsError) {
+        console.error('Error fetching order items:', orderItemsError);
+        throw orderItemsError;
+      }
 
-      // Get user information for all orders
-      const userIds = [...new Set(allOrders.map(order => order.user_id))];
-      const { data: users, error: usersError } = await supabase
-        .from('users')
-        .select(`
-          id,
-          email,
-          role,
-          full_name,
-          registration_number,
-          mobile_number,
-          created_at
-        `)
-        .in('id', userIds)
-        .eq('role', 'student'); // Only get student users
+      console.log('Order items:', orderItems);
 
-      if (usersError) throw usersError;
-
-      // Create a map of users for quick lookup
-      const userMap = new Map();
-      users?.forEach(user => {
-        userMap.set(user.id, user);
+      // Step 3: Filter orders that have items from this staff's canteen
+      const relevantOrders = ordersWithUsers.filter(order => {
+        const orderItemsForOrder = orderItems?.filter(item => item.order_id === order.id) || [];
+        const hasCanteenItems = orderItemsForOrder.some(item => 
+          item.menu_item?.canteen_name === user.full_name
+        );
+        console.log(`Order ${order.id} has canteen items:`, hasCanteenItems);
+        return hasCanteenItems;
       });
 
-      // Filter orders that have items from this staff's canteen
-      const relevantOrders = allOrders.filter(order => {
-        const orderItems = allOrderItems?.filter(item => item.order_id === order.id) || [];
-        return orderItems.some(item => item.menu_item?.canteen_name === user.full_name);
-      });
+      console.log('Relevant orders:', relevantOrders);
 
-      // Build the final orders array with complete data
-      const ordersWithData = relevantOrders.map(order => {
-        const orderItems = allOrderItems?.filter(item => 
+      // Step 4: Build final orders with filtered items and recalculated totals
+      const finalOrders = relevantOrders.map(order => {
+        // Filter order items to only include items from this canteen
+        const canteenOrderItems = orderItems?.filter(item => 
           item.order_id === order.id && 
           item.menu_item?.canteen_name === user.full_name
         ) || [];
 
-        const orderUser = userMap.get(order.user_id);
-
-        // Calculate total amount for items from this canteen only
-        const canteenTotal = orderItems.reduce((sum, item) => 
+        // Calculate total for this canteen's items only
+        const canteenTotal = canteenOrderItems.reduce((sum, item) => 
           sum + (item.price * item.quantity), 0
         );
 
+        console.log(`Order ${order.id} user:`, order.user);
+
         return {
           ...order,
-          user: orderUser,
-          order_items: orderItems,
+          order_items: canteenOrderItems,
           total_amount: canteenTotal
         };
       });
 
-      console.log('Orders with user data:', ordersWithData);
-      setOrders(ordersWithData);
+      console.log('Final orders:', finalOrders);
+      setOrders(finalOrders);
 
     } catch (error) {
-      console.error('Error fetching orders:', error);
+      console.error('Error in fetchOrders:', error);
+      showToast('Failed to fetch orders. Please try again.', 'error');
     } finally {
       setLoading(false);
     }
@@ -390,18 +398,20 @@ const StaffDashboard: React.FC = () => {
 
   // Helper function to format student info
   const formatStudentInfo = (orderUser: any) => {
+    console.log('Formatting student info for user:', orderUser);
+    
     if (!orderUser) {
-      return 'Unknown Student';
+      return 'Unknown Student (No User Data)';
     }
     
-    const name = orderUser.full_name || 'Unknown Student';
+    const name = orderUser.full_name || 'Unknown Name';
     const regNumber = orderUser.registration_number;
     
     if (regNumber) {
       return `${name} (${regNumber})`;
     }
     
-    return name;
+    return `${name} (No Reg. Number)`;
   };
 
   if (loading) {
@@ -495,6 +505,10 @@ const StaffDashboard: React.FC = () => {
                         <p className="text-sm text-gray-600">
                           {new Date(order.created_at).toLocaleDateString()} at{' '}
                           {new Date(order.created_at).toLocaleTimeString()}
+                        </p>
+                        {/* Debug info - remove this in production */}
+                        <p className="text-xs text-red-500 mt-1">
+                          Debug: User ID: {order.user_id}, User Object: {JSON.stringify(order.user)}
                         </p>
                       </div>
                       <div className="text-right">
